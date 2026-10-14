@@ -7,7 +7,7 @@
    (4) az app soha nem töröl fotót véglegesen (csak "törölt" jelölés), minden változás naplózva (journal);
    (5) export: ZIP önellenőrzés után, felhasználói megosztás + megerősítés után számít exportáltnak. */
 "use strict";
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.1.1";
 const DB_NAME = "exfelmeres", DB_VER = 2;
 const PART_LIMIT = (typeof window !== "undefined" && window.__EXF_PART_LIMIT) || 40 * 1024 * 1024;   // ZIP-rész max. mérete (iOS-memória miatt)
 const REMIND_PHOTOS = 40, REMIND_MIN = 60;
