@@ -1,5 +1,5 @@
 /* Ex-felmérés – offline réteg. Csak a programfájlokat gyorsítótárazza; adat NEM kerül ide (az IndexedDB-ben van). */
-const VERSION = "exf-1.1.1";
+const VERSION = "exf-1.1.2";
 const ASSETS = ["./", "./index.html", "./app.css", "./logic.js", "./app.js", "./vendor/jszip.min.js", "./manifest.webmanifest",
   "./icons/icon-180.png", "./icons/icon-192.png", "./icons/icon-512.png"];
 self.addEventListener("install", e => {

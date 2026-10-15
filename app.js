@@ -7,7 +7,7 @@
    (4) az app soha nem töröl fotót véglegesen (csak "törölt" jelölés), minden változás naplózva (journal);
    (5) export: ZIP önellenőrzés után, felhasználói megosztás + megerősítés után számít exportáltnak. */
 "use strict";
-const APP_VERSION = "1.1.1";
+const APP_VERSION = "1.1.2";
 const DB_NAME = "exfelmeres", DB_VER = 2;
 const PART_LIMIT = (typeof window !== "undefined" && window.__EXF_PART_LIMIT) || 40 * 1024 * 1024;   // ZIP-rész max. mérete (iOS-memória miatt)
 const REMIND_PHOTOS = 40, REMIND_MIN = 60;
@@ -605,15 +605,31 @@ function shareStep(part, i, n) {
       <div id="xMsg"></div><button id="xDone" class="primary" style="width:100%;margin-top:10px" disabled>Elmentettem – tovább</button>
       <button id="xCancel" style="width:100%;margin-top:6px">Megszakítás (nem számít exportnak)</button>`, b => {
       const done = b.querySelector("#xDone"), msg = b.querySelector("#xMsg");
+      const chk = `Ellenőrizd, hogy a <b>${esc(part.name)}</b> megérkezett-e (Mac: Letöltések, vagy a Fájlok app). Ha igen: „Elmentettem – tovább”.`;
+      // A megerősítés csak akkor aktív, ha ebben az ablakban ténylegesen megnyílt a megosztás, vagy letöltés történt.
+      let opened = false, dlUsed = false;
+      const allow = () => { done.disabled = !(opened || dlUsed); };
       if (b.querySelector("#xShare")) b.querySelector("#xShare").onclick = () => {
-        navigator.share({ files: [file], title: part.name })
-          .then(() => { msg.innerHTML = `<p class="msg ok">Megosztva. Ha elmentetted, nyomd meg: „Elmentettem – tovább”.</p>`; done.disabled = false; })
-          .catch(e => { msg.innerHTML = `<p class="msg warn">${e && e.name === "AbortError" ? "A megosztás megszakítva." : "A megosztás nem sikerült: " + esc(e && e.message || e)} Próbáld újra, vagy használd a letöltést.</p>`; });
+        // iOS: AirDrop után a share() ígérete gyakran „AbortError”-ral tér vissza vagy SOSEM teljesül, pedig a fájl átment.
+        // Ezért: ha a megosztóablak megnyílt (nincs azonnali InvalidStateError/hiba), a megerősítés elérhetővé válik; a döntés a felhasználóé.
+        let p, settled = false;
+        try { p = navigator.share({ files: [file], title: part.name }); }
+        catch (e) { msg.innerHTML = `<p class="msg warn">A megosztás nem indult el: ${esc(e && e.message || e)}. Használd a letöltést.</p>`; return; }
+        msg.innerHTML = `<p class="msg">${chk}</p>`;
+        const tmr = setTimeout(() => { if (!settled) { opened = true; allow(); } }, 700);
+        Promise.resolve(p)
+          .then(() => { settled = true; clearTimeout(tmr); opened = true; allow(); msg.innerHTML = `<p class="msg ok">Megosztva. ${chk}</p>`; })
+          .catch(e => {
+            settled = true; clearTimeout(tmr);
+            if (e && e.name === "AbortError") { opened = true; allow(); msg.innerHTML = `<p class="msg warn">Az iOS „megszakítva” jelzést adott – AirDrop után ez akkor is előfordul, ha a fájl átment. ${chk} Ha nincs ott: Megosztás újra.</p>`; }
+            else if (e && e.name === "InvalidStateError") { allow(); msg.innerHTML = `<p class="msg warn">Az iOS még nem zárta le egy korábbi megosztást, ezért most nem nyílt meg. Használd a „Tartalék: letöltés” gombot (Fájlok › Letöltések), majd küldd tovább onnan; vagy zárd be és nyisd újra az appot, és ismételd az exportot. A fotók biztonságban vannak.</p>`; }
+            else { allow(); msg.innerHTML = `<p class="msg warn">A megosztás nem sikerült: ${esc(e && e.message || e)}. Próbáld újra, vagy használd a letöltést.</p>`; }
+          });
       };
       b.querySelector("#xDl").onclick = () => {
         const a = document.createElement("a"); const u = URL.createObjectURL(part.blob); a.href = u; a.download = part.name; document.body.appendChild(a); a.click();
         setTimeout(() => { URL.revokeObjectURL(u); a.remove(); }, 120000);
-        msg.innerHTML = `<p class="msg warn">Ellenőrizd a Fájlok app Letöltések mappájában, hogy a fájl ott van-e, majd nyomd meg: „Elmentettem – tovább”.</p>`; done.disabled = false;
+        dlUsed = true; allow(); msg.innerHTML = `<p class="msg warn">Ellenőrizd a Fájlok app Letöltések mappájában, hogy a fájl ott van-e, majd nyomd meg: „Elmentettem – tovább”.</p>`;
       };
       done.onclick = () => { closeModal(); res(true); };
       b.querySelector("#xCancel").onclick = () => { closeModal(); res(false); };
