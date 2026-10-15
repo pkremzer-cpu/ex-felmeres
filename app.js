@@ -7,7 +7,7 @@
    (4) az app soha nem töröl fotót véglegesen (csak "törölt" jelölés), minden változás naplózva (journal);
    (5) export: ZIP önellenőrzés után, felhasználói megosztás + megerősítés után számít exportáltnak. */
 "use strict";
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.3.0";
 const DB_NAME = "exfelmeres", DB_VER = 2;
 const PART_LIMIT = (typeof window !== "undefined" && window.__EXF_PART_LIMIT) || 40 * 1024 * 1024;   // ZIP-rész max. mérete (iOS-memória miatt)
 const BATCH_LIMIT = 240 * 1024 * 1024;   // egy AirDrop-kör max. fotómérete (iOS-memória)
@@ -107,22 +107,27 @@ async function saveRecordNow(id, patch, why) {
   setSave("busy", "Mentés…");
   let rec;
   try {
+    // ZSO/ZSC pár: ugyanaz a módosítás UGYANABBAN a tranzakcióban a pár másik tagjára is (egy tok = egy eszköz).
+    const ids = partnerOf(id) ? [id, partnerOf(id)] : [id], out = {};
     await txDo(["records", "journal"], "readwrite", t => {
       const st = t.objectStore("records");
-      const g = st.get(id);
-      g.onsuccess = () => {
-        const old = g.result || blankRec(id);
-        rec = JSON.parse(JSON.stringify(old));
-        Object.assign(rec, patch);
-        if (patch.res) rec.res = Object.assign({}, old.res || {}, patch.res);
-        if (!("status" in patch) && ["uj", "kesz", "ertekelendo"].includes(old.status)) rec.status = "folyamatban";
-        rec.rev = (old.rev || 0) + 1; rec.updated = now(); rec.by = (S.meta.session || {}).name || ""; rec.tel = S.installId;
-        st.put(rec);
-        t.objectStore("journal").add({ ts: rec.updated, by: rec.by, tel: S.installId, dev: id, why: why || "edit", patch, rev: rec.rev });
-      };
+      for (const rid of ids) {
+        const g = st.get(rid);
+        g.onsuccess = () => {
+          const old = g.result || blankRec(rid);
+          const r2 = JSON.parse(JSON.stringify(old));
+          Object.assign(r2, patch);
+          if (patch.res) r2.res = Object.assign({}, old.res || {}, patch.res);
+          if (!("status" in patch) && ["uj", "kesz", "ertekelendo"].includes(old.status)) r2.status = "folyamatban";
+          if (ids.length > 1) r2.pair = ids.find(x => x !== rid);
+          r2.rev = (old.rev || 0) + 1; r2.updated = now(); r2.by = (S.meta.session || {}).name || ""; r2.tel = S.installId;
+          st.put(r2); out[rid] = r2;
+          t.objectStore("journal").add({ ts: r2.updated, by: r2.by, tel: S.installId, dev: rid, why: (why || "edit") + (rid !== id ? "+pair" : ""), patch, rev: r2.rev });
+        };
+      }
     });
-    S.recs.set(id, rec);
-    if (S.bc) S.bc.postMessage({ t: "rec", id });
+    rec = out[id];
+    for (const rid of ids) { S.recs.set(rid, out[rid]); if (S.bc) S.bc.postMessage({ t: "rec", id: rid }); }
     setSave("ok", "Mentve ✓ " + hhmmss(rec.updated));
     if (["zg", "zp", "tg", "tp", "tt", "tmax"].some(k => k in patch)) {
       try { const lt = Object.assign({}, S.meta.lastTim || {}); for (const k of ["zg", "zp", "tg", "tp", "tt", "tmax"]) if (k in patch) lt[k] = patch[k]; await metaSet("lastTim", lt); } catch (e) { /* kényelmi adat – a rekord már mentve */ }
@@ -184,7 +189,7 @@ async function processPhoto(file) {
     return { blob: file, w: 0, h: 0, thumb: null, orig: true, note: String(e.message || e) };
   }
 }
-function photosOf(id) { return [...S.pmeta.values()].filter(p => p.dev === id).sort((a, b) => a.ts < b.ts ? -1 : 1); }
+function photosOf(id) { const pt = partnerOf(id); return [...S.pmeta.values()].filter(p => p.dev === id || (pt && p.dev === pt)).sort((a, b) => a.ts < b.ts ? -1 : 1); }
 async function addOnePhoto(devId, type, file) {
   const pr = await processPhoto(file);
   const buf = await pr.blob.arrayBuffer();
@@ -271,8 +276,55 @@ function passFilter(d) {
     default: return true;
   }
 }
-function countFor(k) { const keep = S.filter; S.filter = k; const n = S.devs.filter(passFilter).length; S.filter = keep; return n; }
-function rebuildIndex() { S.index = S.devs.map(L.buildIndex); S.byId = new Map(S.devs.map(d => [d.id, d])); }
+function countFor(k) { const keep = S.filter; S.filter = k; const n = S.vis.filter(passFilter).length; S.filter = keep; return n; }
+// ZSO/ZSC pár (egy tok = egy eszköz): a listában csak a ZSO (elsődleges) látszik, a ZSC tagjére is rá lehet keresni.
+function rebuildIndex() {
+  S.byId = new Map(S.devs.map(d => [d.id, d]));
+  S.pairs = L.buildPairs(S.devs);
+  S.vis = S.devs.filter(d => !isSecondary(d.id));
+  S.index = S.vis.map(d => L.buildIndex(d, partnerOf(d.id) ? [S.byId.get(partnerOf(d.id)).tag] : []));
+}
+function partnerOf(id) { return (S.pairs && S.pairs.partner[id]) || null; }
+function isSecondary(id) { const p = S.pairs && S.pairs.primaryOf[id]; return !!p && p !== id; }
+function primaryId(id) { return isSecondary(id) ? S.pairs.primaryOf[id] : id; }
+const PAIR_IGN = ["id", "rev", "updated", "by", "tel", "pair"];
+function recCore(r) { if (!r) return null; const o = {}; for (const k of Object.keys(r).sort()) if (!PAIR_IGN.includes(k)) o[k] = r[k]; return L.canon(o); }
+function recEmpty(r) { return !r || (r.status === "uj" && !Object.keys(r).some(k => !PAIR_IGN.concat(["status", "mode", "res"]).includes(k) && r[k] !== "" && r[k] !== undefined) && !Object.values(r.res || {}).some(Boolean)); }
+function pairConflict(id) { const p = partnerOf(id); if (!p) return false; const a = S.recs.get(id), b = S.recs.get(p); return !!a && !!b && !recEmpty(a) && !recEmpty(b) && recCore(a) !== recCore(b); }
+async function copyPair(src, dst, why) {
+  // src rekord tartalma → dst (saját azonosító, rev, pár-hivatkozás); egy tranzakcióban, naplózva (a régi dst érték a naplóban).
+  // pair-sync: a forrás felmérési metaadatai (by/tel/updated) megmaradnak – így két telefon azonos adata nem látszik ütközésnek.
+  const res = {};
+  await txDo(["records", "journal"], "readwrite", t => {
+    const st = t.objectStore("records"); const g1 = st.get(src);
+    g1.onsuccess = () => { const s1 = g1.result; if (!s1) return; const g2 = st.get(dst);
+      g2.onsuccess = () => { const old = g2.result || blankRec(dst), ts = now();
+        const keep = why === "pair-sync";
+        const r2 = JSON.parse(JSON.stringify(s1)); r2.id = dst; r2.pair = src; r2.rev = Math.max((old.rev || 0) + 1, s1.rev || 0);
+        if (!keep) { r2.updated = ts; r2.by = (S.meta.session || {}).name || s1.by || ""; r2.tel = S.installId; }
+        st.put(r2); res[dst] = r2;
+        t.objectStore("journal").add({ ts, by: (S.meta.session || {}).name || "", tel: S.installId, dev: dst, why, patch: { from: src, old: g2.result || null }, rev: r2.rev });
+        if (s1.pair !== dst) { const s1b = Object.assign({}, s1, { pair: dst }); st.put(s1b); res[src] = s1b; } }; };
+  });
+  for (const k of Object.keys(res)) S.recs.set(k, res[k]);   // memória csak sikeres commit után
+}
+function pairDiff(a, b) {
+  const keys = [...new Set(Object.keys(a || {}).concat(Object.keys(b || {})))].filter(k => !PAIR_IGN.includes(k)).sort();
+  return keys.filter(k => L.canon((a || {})[k] === undefined ? null : a[k]) !== L.canon((b || {})[k] === undefined ? null : b[k])).map(k => [k, (a || {})[k], (b || {})[k]]);
+}
+function pairConflictCount() { if (!S.pairs) return 0; let n = 0; for (const id of Object.keys(S.pairs.partner)) if (!isSecondary(id) && pairConflict(id)) n++; return n; }
+// Indításkor / visszaállítás után: a pár hiányzó tagja megkapja a másik tag adatait (meglévő eltérő adatot NEM ír felül – azt jelzi).
+async function syncPairs() {
+  if (!S.pairs) return { copied: 0, conflicts: 0 };
+  let copied = 0, conflicts = 0;
+  for (const o of Object.keys(S.pairs.primaryOf)) {
+    if (isSecondary(o)) continue; const c = partnerOf(o); const ro = S.recs.get(o), rc = S.recs.get(c);
+    if (ro && !recEmpty(ro) && recEmpty(rc)) { await copyPair(o, c, "pair-sync"); copied++; }
+    else if (rc && !recEmpty(rc) && recEmpty(ro)) { await copyPair(c, o, "pair-sync"); copied++; }
+    else if (pairConflict(o)) conflicts++;
+  }
+  return { copied, conflicts };
+}
 
 /* ---------------- Beállítás ---------------- */
 function renderSetup() {
@@ -337,20 +389,21 @@ async function importInventory(file) {
       t.objectStore("meta").put({ doc: body.doc, projekt: body.projekt, kiadas: body.kiadas, sha, count: body.devices.length, ts: now(), groups: body.groups, checks: body.checks }, "inventory");
       t.objectStore("journal").add({ ts: now(), tel: S.installId, dev: "*", why: "inventory", patch: { sha, count: body.devices.length } });
     });
-    await loadAll(); renderSetup();
+    await loadAll(); await syncPairs(); renderSetup();
   } catch (e) { alertBox("Hiba", `<p class="msg err">${esc(e.message || e)}</p>`); }
 }
 
 /* ---------------- Kereső / lista ---------------- */
 function renderHome() {
   const inv = S.meta.inventory;
-  const eszk = S.devs.filter(d => d.tipus !== "SZEKRENY");
+  const eszk = S.vis.filter(d => d.tipus !== "SZEKRENY");
   const done = eszk.filter(d => (S.recs.get(d.id) || {}).status === "kesz").length;
   const started = eszk.filter(d => devStatus(d)[0] !== "new").length;
   const cabs = [...new Set(S.devs.map(d => d.szekreny))].sort();
   $("#view").innerHTML = `
-  <div class="search"><input id="q" type="search" inputmode="search" ${TXT_ATTR} aria-label="Keresés"
-     placeholder="Keresés: tag, pl. LSHH 320 TSI, PIT220…" value="${esc(S.q)}">
+  <div class="search"><div class="row" style="gap:8px"><input id="q" class="grow" type="search" inputmode="search" ${TXT_ATTR} aria-label="Keresés"
+     placeholder="Keresés: tag, pl. LSHH 320 TSI, PIT220…" value="${esc(S.q)}"><button id="bScan" style="flex:0 0 auto" aria-label="Tervjel beolvasása kamerával">📷 Tervjel</button></div>
+   <div id="scanHint" class="msg hidden"><b>Tervjel beolvasása:</b> koppints <b>még egyszer</b> a keresőmezőbe → <b>Szöveg beolvasása</b> (a billentyűzet felett / a felugró menüben) → irányítsd a kamerát a címkére → <b>Beszúrás</b>. A kábelcímke „W” előtagját és a tipikus betű/szám tévesztéseket az app javítja; a „≈ javított egyezés” találatot mindig ellenőrizd.</div>
    <div class="chips" id="chips"><span class="muted lbl">Állapot:</span>${[["all", "Mind"], ["new", "Nincs kezdve"], ["wip", "Folyamatban"], ["eval", "Értékelendő"], ["nok", "NOK"], ["done", "Kész"], ["cab", "Szekrények"], ["uj", "Leltáron kívüli"]]
       .map(([k, l]) => `<button class="chip ${S.filter === k ? "on" : ""}" data-f="${k}">${l} <b>${countFor(k)}</b></button>`).join("")}</div>
    <div class="chips" id="circ"><span class="muted lbl">Kör (dokumentáció):</span>${[["all", "Mind"], ["exi", "Ex i kör"], ["nonexi", "Nem Ex i kör"]]
@@ -362,6 +415,7 @@ function renderHome() {
   <div class="bar"><button id="bNew">+ Leltáron kívüli</button><button id="bExp" class="primary">Export</button><button id="bSet" aria-label="Beállítás" style="flex:0 0 64px">⚙︎</button></div>`;
   const q = $("#q");
   q.oninput = () => { S.q = q.value; drawList(); };
+  $("#bScan").onclick = () => { $("#scanHint").classList.remove("hidden"); q.focus(); q.select(); };
   $("#chips").querySelectorAll("[data-f]").forEach(b => b.onclick = () => { S.filter = b.dataset.f; renderHome(); });
   $("#circ").querySelectorAll("[data-c]").forEach(b => b.onclick = () => { S.circ = b.dataset.c; renderHome(); });
   $("#cab").onchange = e => { S.cab = e.target.value; renderHome(); };
@@ -371,16 +425,18 @@ function renderHome() {
 function drawList() {
   let arr;
   const plain = !S.q.trim() && S.filter === "all" && !S.cab && S.circ === "all";
-  if (S.q.trim()) arr = L.search(S.devs, S.index, S.q, 400).filter(passFilter).slice(0, 80);
-  else if (plain) arr = (S.meta.recent || []).map(id => S.byId.get(id)).filter(Boolean);
-  else arr = S.devs.filter(passFilter).slice(0, 300);
+  if (S.q.trim()) arr = L.search(S.vis, S.index, S.q, 400).filter(passFilter).slice(0, 80);
+  else if (plain) arr = [...new Set((S.meta.recent || []).map(primaryId))].map(id => S.byId.get(id)).filter(Boolean);
+  else arr = S.vis.filter(passFilter).slice(0, 300);
   const head = plain ? `<li class="muted" style="padding:8px 0">Legutóbbiak – írj a keresőbe, vagy válassz szűrőt.</li>` : "";
   $("#res").innerHTML = head + (arr.length ? arr.map(d => { const [c, l] = devStatus(d); const pc = photosOf(d.id).filter(p => !p.deleted).length;
-    return `<li class="item" data-id="${esc(d.id)}"><div class="grow"><div class="t">${esc(d.tag)}</div><div class="d">${esc(d.leiras)} · ${esc(d.szekreny)}${d.exi === "IGEN" ? " · <b>Ex i</b>" : ""}${pc ? ` · 📷 ${pc}` : ""}</div></div><span class="st ${c}">${esc(l)}</span></li>`; }).join("")
+    const pt = partnerOf(d.id) ? S.byId.get(partnerOf(d.id)).tag : "", mk = S.q.trim() ? L.matchKind(S.index[S.vis.indexOf(d)], S.q) : "";
+    return `<li class="item" data-id="${esc(d.id)}"><div class="grow"><div class="t">${esc(d.tag)}${mk === "pontos" ? ' <span class="mk ok">✓ pontos</span>' : mk === "ocr" ? ' <span class="mk ocr">≈ javított egyezés – ellenőrizd</span>' : ""}</div><div class="d">${pt ? `+ ${esc(pt)} · <b>egy tok</b>${pairConflict(d.id) ? " · <b>⚠ pár eltér</b>" : ""} · ` : ""}${esc(d.leiras)}${pt ? " / " + esc(S.byId.get(partnerOf(d.id)).leiras) : ""} · ${esc(d.szekreny)}${d.exi === "IGEN" ? " · <b>Ex i</b>" : ""}${pc ? ` · 📷 ${pc}` : ""}</div></div><span class="st ${c}">${esc(l)}</span></li>`; }).join("")
     : (S.q.trim() || !plain ? `<li class="muted" style="padding:12px 0">Nincs találat.${S.q.trim() ? " Ha az eszköz nincs a leltárban: <b>+ Leltáron kívüli</b>." : ""}</li>` : ""));
   $("#res").querySelectorAll("[data-id]").forEach(li => li.onclick = () => openDevice(li.dataset.id));
 }
 async function openDevice(id) {
+  id = primaryId(id);
   const rec = (S.meta.recent || []).filter(x => x !== id); rec.unshift(id); await metaSet("recent", rec.slice(0, 30));
   S.cur = id; go("device");
 }
@@ -396,7 +452,9 @@ function selHtml(key, opts, val, label) {
 function freeUrls() { for (const u of S.urls) URL.revokeObjectURL(u); S.urls = []; }
 function renderDevice(id) {
   freeUrls();
+  if (isSecondary(id)) { id = primaryId(id); S.cur = id; }
   const d = S.byId.get(id); if (!d) return go("home");
+  const pd = partnerOf(id) ? S.byId.get(partnerOf(id)) : null;
   const r = recOf(id), inv = S.meta.inventory, groups = Object.fromEntries(inv.groups.map(g => [g.key, g]));
   const ph = photosOf(id), ev = L.evaluate(r), isCab = d.tipus === "SZEKRENY";
   const gyors = r.mode === "gyors";
@@ -404,7 +462,7 @@ function renderDevice(id) {
   const evc = v => v === "MEGFELEL" ? "M" : v === "NEM FELEL MEG" ? "N" : v === "TISZTÁZANDÓ" ? "T" : "";
   $("#view").innerHTML = `
   <button id="bBack" style="margin-bottom:8px">‹ Keresés</button>
-  <h1>${esc(d.tag)}</h1>
+  <h1>${esc(d.tag)}</h1>${pd ? `<div class="msg">Egy tok, egy eszköz: <b>${esc(pd.tag)}</b> (${esc(pd.id)}) – minden adat és fotó mindkét tételre vonatkozik.${pairConflict(id) ? `<br><b>⚠ Figyelem:</b> a két tag korábban eltérő adattal lett rögzítve. <button id="bPairFix">Eltérés feloldása…</button>` : ""}</div>` : ""}
   <div class="kv"><b>Azonosító</b><span>${esc(d.id)}</span><b>Leírás</b><span>${esc(d.leiras)}</span><b>Kategória</b><span>${esc(d.kat)}</span>
    <b>Szekrény</b><span>${esc(d.szekreny)}</span>${d.exi ? `<b>Ex i (rajz)</b><span>${esc(d.exi)}</span>` : ""}${d.kabel ? `<b>Kábel (rajz)</b><span>${esc(d.kabel)}</span>` : ""}
    ${d.rajz ? `<b>Rajz</b><span>${esc(d.rajz)} ${d.oldal ? "· o. " + esc(d.oldal) : ""}</span>` : ""}${d.tim ? `<b>TIM-rajz</b><span>${esc(d.tim)}</span>` : ""}
@@ -427,6 +485,8 @@ function renderDevice(id) {
   <h2>Adattábla</h2>
   ${selHtml("mod", L.LISTS.mod, r.mod, "Védelmi mód")}
   <label class="f">Teljes Ex-jelölés (pl. II 2G Ex db IIB T4 Gb)</label><textarea data-txt="exj" rows="2" ${TXT_ATTR.replace('autocapitalize="characters"', 'autocapitalize="off"')}>${esc(r.exj || "")}</textarea>
+  <div class="row" style="margin-top:6px"><button id="bExjScan" class="grow">📷 Jelölés beolvasása</button><button id="bExjParse" class="grow primary">⇩ Mezők a jelölésből</button></div>
+  <div id="exjHint" class="msg hidden"><b>Jelölés beolvasása:</b> koppints <b>még egyszer</b> a „Teljes Ex-jelölés” mezőbe → <b>Szöveg beolvasása</b> → irányítsd a kamerát az adattábla Ex-sorára (és az IP / tanúsítvány sorra) → <b>Beszúrás</b>. Utána: <b>⇩ Mezők a jelölésből</b> – a javaslatot mezőnként jóváhagyod.</div>
   <div class="row"><div class="grow">${selHtml("eg", L.LISTS.eg, r.eg, "EPL gáz / kat.")}</div><div class="grow">${selHtml("dg", L.LISTS.dg, r.dg, "Gázcsoport")}</div><div class="grow">${selHtml("dt", L.LISTS.dt, r.dt, "T-osztály")}</div></div>
   <div class="row"><div class="grow">${selHtml("ep", L.LISTS.ep, r.ep, "EPL por / kat.")}</div><div class="grow">${selHtml("dp", L.LISTS.dp, r.dp, "Porcsoport")}</div><div class="grow"><label class="f">Max. felületi °C (por)</label><input type="text" inputmode="decimal" ${TXT_ATTR} data-txt="dtc" value="${esc(r.dtc || "")}"></div></div>
   <label class="f">Tanúsítványszám</label><input type="text" data-txt="cert" ${TXT_ATTR} value="${esc(r.cert || "")}">
@@ -442,6 +502,20 @@ function renderDevice(id) {
   <p class="muted">Állapot: <b>${esc(devStatus(d)[1])}</b> · rev. ${esc(r.rev || 0)}${r.updated ? " · " + esc(new Date(r.updated).toLocaleString("hu-HU")) : ""}${r.by ? " · " + esc(r.by) : ""}</p>
   <div class="bar"><button id="bBack2">‹ Keresés</button><button id="bDone" class="primary">${gyors ? "Kész → értékelendő" : "Kész"}</button></div>`;
   drawPhotos(id);
+  if ($("#bPairFix")) $("#bPairFix").onclick = async () => {
+    await flushPending(); await S.saveChain;
+    const pid = partnerOf(id), a = S.recs.get(id), b2 = S.recs.get(pid), df = pairDiff(a, b2);
+    const fmt = v => v === undefined || v === null || v === "" ? '<span class="muted">—</span>' : esc(typeof v === "object" ? JSON.stringify(v) : v);
+    modal(`<h2>ZSO/ZSC eltérés</h2><p class="muted">Válaszd ki, melyik tag adatai legyenek érvényesek mindkettőre. A felülírt érték a naplóban megmarad.</p>
+      <table class="pf"><tr><th>Mező</th><th>${esc(d.tag)}</th><th>${esc(pd.tag)}</th></tr>${df.map(([k, x, y]) => `<tr><td>${esc(k)}</td><td>${fmt(x)}</td><td>${fmt(y)}</td></tr>`).join("")}</table>
+      <button id="pfA" class="primary" style="width:100%;margin-top:10px">${esc(d.tag)} adatai érvényesek</button>
+      <button id="pfB" style="width:100%;margin-top:6px">${esc(pd.tag)} adatai érvényesek</button>
+      <button id="mNo" style="width:100%;margin-top:6px">Mégse</button>`, bx => {
+      bx.querySelector("#mNo").onclick = closeModal;
+      const run = (src, dst) => { closeModal(); const job = S.saveChain.then(() => copyPair(src, dst, "pair-fix")); S.saveChain = job.catch(() => {}); job.then(() => renderDevice(id), e => alertBox("Mentési hiba", `<p class="msg err">${esc(e.message || e)}</p>`)); };
+      bx.querySelector("#pfA").onclick = () => run(id, pid); bx.querySelector("#pfB").onclick = () => run(pid, id);
+    });
+  };
   const back = async () => { await flushPending(); freeUrls(); go("home"); };
   $("#bBack").onclick = back; $("#bBack2").onclick = back;
   $("#view").querySelectorAll("[data-cam]").forEach(b => b.onclick = () => pickPhoto(id, b.dataset.cam, "#camera"));
@@ -458,6 +532,8 @@ function renderDevice(id) {
   $("#view").querySelectorAll("select[data-sel]").forEach(se => se.onchange = async () => { await flushPending(); await saveRecord(id, { [se.dataset.sel]: se.value }, "field"); renderDevice(id); });
   $("#view").querySelectorAll("[data-txt]").forEach(inp => { inp.oninput = () => queueText(id, inp.dataset.txt, inp.value); inp.onblur = async () => { await flushPending(); if (["tmax", "dtc"].includes(inp.dataset.txt)) renderDevice(id); }; });
   $("#view").querySelectorAll("[data-info]").forEach(b => b.onclick = () => showInfo(b.dataset.info));
+  if ($("#bExjScan")) $("#bExjScan").onclick = () => { $("#exjHint").classList.remove("hidden"); const ta = $("#view").querySelector("textarea[data-txt=exj]"); ta.focus(); };
+  if ($("#bExjParse")) $("#bExjParse").onclick = async () => { await flushPending(); proposeFields(id); };
   if ($("#bOut")) $("#bOut").onclick = async () => { await flushPending(); await saveRecord(id, { zg: "Nincs", zp: "Nincs" }, "outside"); renderDevice(id); };
   if ($("#bAllOk")) $("#bAllOk").onclick = async () => {
     await flushPending(); const cur = recOf(id); const rest = d.groups.filter(g => !(cur.res || {})[g]);
@@ -473,6 +549,29 @@ function renderDevice(id) {
     if (v.warnings.length && !(await confirmBox("Figyelmeztetés", v.warnings.map(esc).join("<br>") + "<br><br>Így is lezárod?", "Lezárom", false))) return;
     await saveRecord(id, { status: cur.mode === "gyors" ? "ertekelendo" : "kesz" }, "done"); freeUrls(); go("home");
   };
+}
+const PF = [["mod", "Védelmi mód"], ["eg", "EPL gáz / kat."], ["dg", "Gázcsoport"], ["dt", "T-osztály"], ["ep", "EPL por / kat."], ["dp", "Porcsoport"], ["dtc", "Max. felületi °C (por)"], ["ip", "IP"], ["cert", "Tanúsítványszám"]];
+function proposeFields(id) {
+  const cur = recOf(id), txt = String(cur.exj || "").trim();
+  if (!txt) return alertBox("Nincs jelölés", `<p class="msg warn">Előbb olvasd be (vagy írd be) a teljes Ex-jelölést a „Teljes Ex-jelölés” mezőbe.</p>`);
+  const pr = L.proposeFromMarking(txt);
+  const rows = PF.filter(([k]) => pr.fields[k] !== undefined).map(([k, lab]) => {
+    const now_ = String(cur[k] || ""), nw = pr.fields[k], same = now_ === nw;
+    return `<tr><td>${esc(lab)}</td><td>${now_ ? esc(now_) : '<span class="muted">—</span>'}</td><td><b>${esc(nw)}</b>${same ? ' <span class="mk ok">egyezik</span>' : now_ ? ' <span class="mk ocr">eltér</span>' : ""}</td>
+      <td>${same ? "" : `<input type="checkbox" data-pf="${esc(k)}" ${now_ ? "" : "checked"} aria-label="${esc(lab)} átvétele">`}</td></tr>`; }).join("");
+  if (!rows) return alertBox("Nincs javaslat", `<p class="msg warn">A szövegből nem olvasható ki mező.</p>${pr.notes.map(n => `<p class="muted">${esc(n)}</p>`).join("")}`);
+  modal(`<h2>Javaslat a jelölésből</h2><p class="muted" style="word-break:break-word">„${esc(txt)}”</p>
+    <table class="pf"><tr><th>Mező</th><th>Most</th><th>Javaslat</th><th>Átvesz</th></tr>${rows}</table>
+    ${pr.notes.map(n => `<p class="msg warn" style="margin:4px 0">${esc(n)}</p>`).join("")}
+    <p class="muted">A javaslat a beolvasott szövegből készül – <b>a táblával összevetve</b> hagyd jóvá. Eltérő meglévő érték alapból NEM íródik felül.</p>
+    <div class="row" style="margin-top:10px"><button id="mNo" class="grow">Mégse</button><button id="mYes" class="grow primary">Kijelöltek átvétele</button></div>`, b => {
+    b.querySelector("#mNo").onclick = closeModal;
+    b.querySelector("#mYes").onclick = async () => {
+      const patch = {}; b.querySelectorAll("[data-pf]").forEach(c => { if (c.checked) patch[c.dataset.pf] = pr.fields[c.dataset.pf]; });
+      closeModal();
+      if (Object.keys(patch).length) { await saveRecord(id, patch, "ocr-parse"); renderDevice(id); }
+    };
+  });
 }
 function chooseTypeThen(fn) {
   modal(`<h2>Fotó típusa</h2>${L.PHOTO_TYPES.map(t => `<button data-t="${t.key}" style="width:100%;margin:4px 0">${esc(t.label)}</button>`).join("")}<button id="mNo" style="width:100%;margin-top:8px">Mégse</button>`,
@@ -783,6 +882,7 @@ async function restoreFromZips(files) {
     await txDo(["journal"], "readwrite", t => t.objectStore("journal").add({ ts: now(), by: (S.meta.session || {}).name, tel: S.installId, dev: "*", why: "restore", patch: { addedP, addedR, badP, skipped, conflicts } }));
   });
   await loadAll();
+  await syncPairs();
   await alertBox("Visszaállítás", `<p class="msg ${badP ? "err" : "ok"}">Fotó hozzáadva: ${addedP} · rekord frissítve: ${addedR} · már meglévő fotó: ${skipped} · HIBÁS (kihagyva): ${badP}</p>
     ${conflicts.length ? `<p class="msg warn">Más telefon adatával felülírt rekord (naplózva): ${conflicts.map(esc).join("<br>")}</p>` : ""}`);
   renderSetup();
@@ -798,6 +898,8 @@ function updateBanner() {
     const mins = (Date.now() - new Date(oldest).getTime()) / 60000;
     if (un.length >= REMIND_PHOTOS || mins >= REMIND_MIN) msgs.push(`${un.length} fotó még nincs exportálva (legrégebbi ${Math.round(mins)} perce). <button id="bExpB">Export most</button>`);
   }
+  const pc = pairConflictCount();
+  if (pc) msgs.push(`⚠ ${pc} ZSO/ZSC pár eltérő adattal – a tételt megnyitva oldható fel (⚠ jelzés a listában).`);
   if (S.swError) msgs.push(`Az offline réteg nem indult el (${esc(S.swError)}); az app működik, de internet nélkül nem indítható újra.`);
   if (S.meta.inventory && !isStandalone()) msgs.push("Nem a főképernyőről telepített appként fut – az adatok veszélyben lehetnek (lásd Beállítás).");
   else if (S.meta.persist && S.meta.persist.ok === false) msgs.push("A tartós tárolás nincs engedélyezve – exportálj gyakran.");
@@ -835,6 +937,7 @@ async function boot() {
     if (!window.indexedDB || !window.crypto || !crypto.subtle) throw new Error("A böngésző nem támogatja a biztonságos tárolást (HTTPS szükséges).");
     S.db = await idbOpen();
     await loadAll();
+    await syncPairs();
     setSave("ok", "Kész");
     try { S.bc = new BroadcastChannel("exf"); S.bc.onmessage = async e => { if (e.data && e.data.t === "rec") { const r = await getOne("records", e.data.id); if (r) S.recs.set(r.id, r); } }; } catch (e) { S.bc = null; }
     if ("serviceWorker" in navigator) {

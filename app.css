@@ -83,3 +83,10 @@ label.f{display:block;font-size:13px;font-weight:700;margin:12px 0 4px}
 .sheet img{max-width:100%;border-radius:8px}
 .progress{height:10px;border-radius:5px;background:var(--na-bg);overflow:hidden}.progress div{height:100%;background:var(--ok)}
 .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;word-break:break-all}
+/* v1.3: keresési egyezés-jelölés */
+.mk { font-size: 12px; font-weight: 600; padding: 1px 6px; border-radius: 6px; margin-left: 6px; white-space: nowrap; }
+.mk.ok { background: #DFF0D8; color: #1E5631; }
+.mk.ocr { background: #FFF2CC; color: #7A5200; }
+table.pf { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.pf th, table.pf td { border-bottom: 1px solid var(--line); padding: 6px 4px; text-align: left; vertical-align: top; }
+table.pf input[type=checkbox] { width: 24px; height: 24px; }
