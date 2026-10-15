@@ -7,7 +7,7 @@
    (4) az app soha nem töröl fotót véglegesen (csak "törölt" jelölés), minden változás naplózva (journal);
    (5) export: ZIP önellenőrzés után, felhasználói megosztás + megerősítés után számít exportáltnak. */
 "use strict";
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.3.1";
 const DB_NAME = "exfelmeres", DB_VER = 2;
 const PART_LIMIT = (typeof window !== "undefined" && window.__EXF_PART_LIMIT) || 40 * 1024 * 1024;   // ZIP-rész max. mérete (iOS-memória miatt)
 const BATCH_LIMIT = 240 * 1024 * 1024;   // egy AirDrop-kör max. fotómérete (iOS-memória)
@@ -402,8 +402,8 @@ function renderHome() {
   const cabs = [...new Set(S.devs.map(d => d.szekreny))].sort();
   $("#view").innerHTML = `
   <div class="search"><div class="row" style="gap:8px"><input id="q" class="grow" type="search" inputmode="search" ${TXT_ATTR} aria-label="Keresés"
-     placeholder="Keresés: tag, pl. LSHH 320 TSI, PIT220…" value="${esc(S.q)}"><button id="bScan" style="flex:0 0 auto" aria-label="Tervjel beolvasása kamerával">📷 Tervjel</button></div>
-   <div id="scanHint" class="msg hidden"><b>Tervjel beolvasása:</b> koppints <b>még egyszer</b> a keresőmezőbe → <b>Szöveg beolvasása</b> (a billentyűzet felett / a felugró menüben) → irányítsd a kamerát a címkére → <b>Beszúrás</b>. A kábelcímke „W” előtagját és a tipikus betű/szám tévesztéseket az app javítja; a „≈ javított egyezés” találatot mindig ellenőrizd.</div>
+     placeholder="Keresés: tag, pl. LSHH 320 TSI, PIT220…" value="${esc(S.q)}"><button id="bScan" style="flex:0 0 auto" aria-label="Tervjel beolvasása az iPhone Élő szöveg funkciójával">📷 Tervjel</button></div>
+   <div id="scanHint" class="msg hidden"><b>Tervjel beolvasása:</b> a kurzor már a keresőmezőben van – koppints <b>még egyszer</b> a mezőbe, és a felugró menüben válaszd: <b>Szöveg beolvasása / Scan Text</b> (vagy a billentyűzet feletti beolvasás-ikont) → a kamerakép a billentyűzet helyén nyílik meg → irányítsd a címkére → <b>Beszúrás / Insert</b>. A kábelcímke „W” előtagját és a tipikus betű/szám tévesztéseket az app javítja; a „≈ javított egyezés” találatot mindig ellenőrizd.<br><span class="muted"><b>Előfeltétel (egyszer):</b> az iPhone „Élő szöveg” (Live Text) funkciója magyar telefonnyelven nem érhető el. Beállítások › Általános › Nyelv és régió: adj hozzá angolt (English); ha az „Élő szöveg” kapcsoló így sem jelenik meg, a bejárás idejére állítsd a telefon nyelvét angolra, és kapcsold be. Az app ettől magyar marad.</span></div>
    <div class="chips" id="chips"><span class="muted lbl">Állapot:</span>${[["all", "Mind"], ["new", "Nincs kezdve"], ["wip", "Folyamatban"], ["eval", "Értékelendő"], ["nok", "NOK"], ["done", "Kész"], ["cab", "Szekrények"], ["uj", "Leltáron kívüli"]]
       .map(([k, l]) => `<button class="chip ${S.filter === k ? "on" : ""}" data-f="${k}">${l} <b>${countFor(k)}</b></button>`).join("")}</div>
    <div class="chips" id="circ"><span class="muted lbl">Kör (dokumentáció):</span>${[["all", "Mind"], ["exi", "Ex i kör"], ["nonexi", "Nem Ex i kör"]]
@@ -486,7 +486,7 @@ function renderDevice(id) {
   ${selHtml("mod", L.LISTS.mod, r.mod, "Védelmi mód")}
   <label class="f">Teljes Ex-jelölés (pl. II 2G Ex db IIB T4 Gb)</label><textarea data-txt="exj" rows="2" ${TXT_ATTR.replace('autocapitalize="characters"', 'autocapitalize="off"')}>${esc(r.exj || "")}</textarea>
   <div class="row" style="margin-top:6px"><button id="bExjScan" class="grow">📷 Jelölés beolvasása</button><button id="bExjParse" class="grow primary">⇩ Mezők a jelölésből</button></div>
-  <div id="exjHint" class="msg hidden"><b>Jelölés beolvasása:</b> koppints <b>még egyszer</b> a „Teljes Ex-jelölés” mezőbe → <b>Szöveg beolvasása</b> → irányítsd a kamerát az adattábla Ex-sorára (és az IP / tanúsítvány sorra) → <b>Beszúrás</b>. Utána: <b>⇩ Mezők a jelölésből</b> – a javaslatot mezőnként jóváhagyod.</div>
+  <div id="exjHint" class="msg hidden"><b>Jelölés beolvasása:</b> a kurzor már a „Teljes Ex-jelölés” mezőben van – koppints <b>még egyszer</b> a mezőbe → <b>Szöveg beolvasása / Scan Text</b> → irányítsd a kamerát az adattábla Ex-sorára (és az IP / tanúsítvány sorra) → <b>Beszúrás / Insert</b>. Utána: <b>⇩ Mezők a jelölésből</b> – a javaslatot mezőnként jóváhagyod.<br><span class="muted"><b>Előfeltétel (egyszer):</b> az iPhone „Élő szöveg” (Live Text) funkciója magyar telefonnyelven nem érhető el. Beállítások › Általános › Nyelv és régió: adj hozzá angolt (English); ha az „Élő szöveg” kapcsoló így sem jelenik meg, a bejárás idejére állítsd a telefon nyelvét angolra, és kapcsold be. Az app ettől magyar marad.</span></div>
   <div class="row"><div class="grow">${selHtml("eg", L.LISTS.eg, r.eg, "EPL gáz / kat.")}</div><div class="grow">${selHtml("dg", L.LISTS.dg, r.dg, "Gázcsoport")}</div><div class="grow">${selHtml("dt", L.LISTS.dt, r.dt, "T-osztály")}</div></div>
   <div class="row"><div class="grow">${selHtml("ep", L.LISTS.ep, r.ep, "EPL por / kat.")}</div><div class="grow">${selHtml("dp", L.LISTS.dp, r.dp, "Porcsoport")}</div><div class="grow"><label class="f">Max. felületi °C (por)</label><input type="text" inputmode="decimal" ${TXT_ATTR} data-txt="dtc" value="${esc(r.dtc || "")}"></div></div>
   <label class="f">Tanúsítványszám</label><input type="text" data-txt="cert" ${TXT_ATTR} value="${esc(r.cert || "")}">
