@@ -7,9 +7,10 @@
    (4) az app soha nem töröl fotót véglegesen (csak "törölt" jelölés), minden változás naplózva (journal);
    (5) export: ZIP önellenőrzés után, felhasználói megosztás + megerősítés után számít exportáltnak. */
 "use strict";
-const APP_VERSION = "1.1.2";
+const APP_VERSION = "1.2.0";
 const DB_NAME = "exfelmeres", DB_VER = 2;
 const PART_LIMIT = (typeof window !== "undefined" && window.__EXF_PART_LIMIT) || 40 * 1024 * 1024;   // ZIP-rész max. mérete (iOS-memória miatt)
+const BATCH_LIMIT = 240 * 1024 * 1024;   // egy AirDrop-kör max. fotómérete (iOS-memória)
 const REMIND_PHOTOS = 40, REMIND_MIN = 60;
 const MAX_EDGE = 2560, JPEG_Q = 0.85, THUMB_EDGE = 320;
 const L = ExLogic;
@@ -53,7 +54,7 @@ async function getAllFix(store) { let v; await txDo([store], "readonly", t => { 
 async function getOne(store, key) { let v; await txDo([store], "readonly", t => { rq(t.objectStore(store).get(key)).then(x => v = x); }); return v; }
 async function metaSet(k, v) { await txDo(["meta"], "readwrite", t => t.objectStore("meta").put(v, k)); S.meta[k] = v; }
 async function loadMeta() {
-  for (const k of ["inventory", "session", "lastExport", "lastTim", "defaultMode", "persist", "recent", "exports", "installId"]) S.meta[k] = await getOne("meta", k);
+  for (const k of ["inventory", "session", "lastExport", "lastTim", "defaultMode", "persist", "recent", "exports", "installId", "fullRun", "batchLimit", "exportAttempt"]) S.meta[k] = await getOne("meta", k);
   if (!S.meta.installId) await metaSet("installId", "TEL-" + uuid().slice(0, 8).toUpperCase());
   S.installId = S.meta.installId;
 }
@@ -540,19 +541,23 @@ function renderExport() {
   const un = unexported(), all = [...S.pmeta.values()];
   const unB = un.reduce((a, p) => a + p.bytes, 0), allB = all.reduce((a, p) => a + p.bytes, 0);
   const ex = S.meta.exports || [];
+  const fr = S.meta.fullRun && S.meta.fullRun.id ? S.meta.fullRun : null, frLeft = fr ? (dn => all.filter(p => !dn.has(p.pid)).length)(new Set(fr.done)) : 0;
   $("#view").innerHTML = `<button id="bBack" style="margin-bottom:8px">‹ Keresés</button><h1>Mentés / export</h1>
   <div class="card"><div class="kv"><b>Fotók összesen</b><span>${all.length} db · ${fmtBytes(allB)}</span><b>Még nem exportált</b><span><b>${un.length} db · ${fmtBytes(unB)}</b></span>
     <b>Rögzített eszközök</b><span>${[...S.recs.values()].filter(r => r.status !== "uj").length}</span><b>Utolsó export</b><span>${S.meta.lastExport ? esc(new Date(S.meta.lastExport.ts).toLocaleString("hu-HU")) : "még nem volt"}</span>
     <b>Telefon</b><span>${esc(S.installId)}</span></div>
     <p id="persistInfo" class="muted"></p></div>
   <button id="bInc" class="primary" style="width:100%;margin:6px 0">Növekményes export (új fotók + minden adat)</button>
-  <button id="bFull" style="width:100%;margin:6px 0">Teljes export (minden fotó + minden adat)</button>
+  ${fr ? `<p class="msg warn">Teljes export folyamatban: még ${frLeft} fotó van hátra.</p>` : ""}
+  <button id="bFull" style="width:100%;margin:6px 0">${fr ? "Teljes export folytatása" : "Teljes export (minden fotó + minden adat)"}</button>
+  ${fr ? `<button id="bFullReset" style="width:100%;margin:6px 0">Teljes export elölről</button>` : ""}
   <p class="muted">Minden ZIP tartalmazza a teljes adatállományt (data.json, CSV, napló) és a fotók SHA-256 listáját; legfeljebb ${fmtBytes(PART_LIMIT)}-os részekre bomlik.
-   Mentés: a megosztás-ablakban <b>Mentés a Fájlokba</b> (iCloud Drive) vagy <b>AirDrop</b> a Macre. A fotók csak a megerősítés után számítanak exportáltnak – az app SOHA nem törli őket.</p>
+   Az összes rész <b>egyetlen AirDrop-pal</b> megy át (egy körben legfeljebb ${fmtBytes(batchLimit())} fotó; ha több van, az app körönként halad, szükség esetén adatmentés után újraindul). A fotók csak a megerősítés után számítanak exportáltnak – az app SOHA nem törli őket.</p>
   <h3>Korábbi exportok</h3>${ex.length ? `<ul class="list">${ex.slice().reverse().map(e => `<li class="item"><div class="grow"><div class="t" style="font-size:14px">${esc(e.name)}</div><div class="d">${esc(new Date(e.ts).toLocaleString("hu-HU"))} · ${esc(e.photos)} fotó · ${esc(e.confirmed ? "megerősítve ✓" : "NEM megerősített")}</div></div></li>`).join("")}</ul>` : `<p class="muted">Nincs.</p>`}`;
   $("#bBack").onclick = () => go("home");
-  const run = full => { $("#bInc").disabled = $("#bFull").disabled = true; doExport(full).finally(() => { if ($("#bInc")) { $("#bInc").disabled = $("#bFull").disabled = false; } }); };
+  const run = full => { const bs = ["#bInc", "#bFull", "#bFullReset"].map(q => $(q)).filter(Boolean); bs.forEach(b => b.disabled = true); doExport(full).finally(() => bs.forEach(b => { if (b.isConnected) b.disabled = false; })); };
   $("#bInc").onclick = () => run(false); $("#bFull").onclick = () => run(true);
+  if ($("#bFullReset")) $("#bFullReset").onclick = async () => { if (await confirmBox("Teljes export elölről", "A félbehagyott teljes export állapota törlődik, és a következő teljes export újra minden fotót tartalmaz. Adat és fotó nem törlődik. Folytatod?", "Elölről")) { await metaSet("fullRun", null); renderExport(); } };
   showPersist();
 }
 function csvEsc(v) { v = String(v === undefined || v === null ? "" : v); if (/^[=+\-@\t\r]/.test(v)) v = "'" + v; return /[";\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
@@ -594,74 +599,141 @@ async function buildPart(parts, i, exportId, full, journal) {
   if ((await sha256(new TextEncoder().encode(await chk.file("data.json").async("string")))) !== dataSha) bad++;
   return { name, blob, bad: bad + manifest.filter(m => !m.match).length, count: parts[i].length };
 }
-function shareStep(part, i, n) {
-  // A megosztás KÖZVETLENÜL a felhasználói koppintásból indul (iOS user-activation követelmény).
+/* Egyetlen megosztás = egyetlen AirDrop az összes részzel.
+   Ok: iOS-en (főképernyős web-app) AirDrop után a share() ígérete gyakran SOSEM teljesül, és amíg függ, az iOS
+   új share()-t nem enged (InvalidStateError) – ezért részenkénti megosztás nem megbízható. Megoldás: (1) egy körben
+   minden rész EGY share()-hívással megy; (2) egy kör mérete BATCH_LIMIT-re korlátozott (memória); (3) ha a kör
+   végén a megosztás még függ, és van következő kör, az app adatmentés után újratölt (ez zárja le az iOS-megosztást). */
+let lastShare = null;   // { settled: bool } – a legutóbbi share() állapota
+function shareHung() { return !!(lastShare && !lastShare.settled); }
+function shareAll(built, round) {
   return new Promise(res => {
-    const file = new File([part.blob], part.name, { type: "application/zip" });
-    const can = !!(navigator.canShare && navigator.canShare({ files: [file] }));
-    modal(`<h2>Rész ${i + 1}/${n} kész</h2><p><b>${esc(part.name)}</b><br>${part.count} fotó · ${fmtBytes(part.blob.size)} · önellenőrzés ✓</p>
-      ${can ? `<button id="xShare" class="primary" style="width:100%;margin:6px 0">Megosztás / Mentés a Fájlokba</button>` : ""}
-      <button id="xDl" style="width:100%;margin:6px 0">${can ? "Tartalék: letöltés" : "Letöltés (Fájlok › Letöltések)"}</button>
-      <div id="xMsg"></div><button id="xDone" class="primary" style="width:100%;margin-top:10px" disabled>Elmentettem – tovább</button>
+    const files = built.map(p => new File([p.blob], p.name, { type: "application/zip" }));
+    const n = files.length, nPh = built.reduce((a, p) => a + p.count, 0), tot = built.reduce((a, p) => a + p.blob.size, 0);
+    let can = false; try { can = !!(navigator.canShare && navigator.canShare({ files })); } catch (e) { can = false; }
+    const list = built.map((p, i) => `<li class="item"><div class="grow"><div class="t" style="font-size:13px;word-break:break-all">${esc(p.name)}</div><div class="d">${p.count} fotó · ${fmtBytes(p.blob.size)} · önellenőrzés ✓</div></div><button data-dl="${i}" style="flex:0 0 auto">Letöltés</button></li>`).join("");
+    modal(`<h2>ZIP-ek készen – küldés${round.multi ? ` – ${round.k}. kör` : ""}</h2>${round.leftAfter ? `<p class="muted">Ez után még ${round.leftAfter} fotó következik a következő kör(ök)ben.</p>` : ""}
+      <p><b>${n} fájl</b> · ${nPh} fotó · ${fmtBytes(tot)}</p>
+      ${can ? `<button id="xShare" class="primary" style="width:100%;margin:6px 0">AirDrop / Megosztás – mind a(z) ${n} fájl egyszerre</button>` : `<p class="msg warn">Ez a készülék nem tudja egyszerre megosztani a fájlokat – töltsd le mindet (Fájlok › Letöltések), és onnan küldd AirDroppal.</p>`}
+      <details ${can ? "" : "open"}><summary class="muted">Tartalék: letöltés fájlonként</summary><ul class="list">${list}</ul></details>
+      <div id="xMsg"></div>
+      <button id="xDone" class="primary" style="width:100%;margin-top:10px" disabled>Elmentettem – mind a(z) ${n} fájl megérkezett</button>
       <button id="xCancel" style="width:100%;margin-top:6px">Megszakítás (nem számít exportnak)</button>`, b => {
       const done = b.querySelector("#xDone"), msg = b.querySelector("#xMsg");
-      const chk = `Ellenőrizd, hogy a <b>${esc(part.name)}</b> megérkezett-e (Mac: Letöltések, vagy a Fájlok app). Ha igen: „Elmentettem – tovább”.`;
-      // A megerősítés csak akkor aktív, ha ebben az ablakban ténylegesen megnyílt a megosztás, vagy letöltés történt.
-      let opened = false, dlUsed = false;
-      const allow = () => { done.disabled = !(opened || dlUsed); };
+      const names = built.map(p => esc(p.name)).join("<br>");
+      const chk = `Ellenőrizd a Macen (Letöltések), hogy mind a(z) ${n} fájl megérkezett:<br><span class="muted" style="font-size:12px;word-break:break-all">${names}</span><br>Ha igen: „Elmentettem”.`;
+      let opened = false; const dl = new Set();
+      const allow = () => { done.disabled = !(opened || dl.size === n); };
       if (b.querySelector("#xShare")) b.querySelector("#xShare").onclick = () => {
-        // iOS: AirDrop után a share() ígérete gyakran „AbortError”-ral tér vissza vagy SOSEM teljesül, pedig a fájl átment.
-        // Ezért: ha a megosztóablak megnyílt (nincs azonnali InvalidStateError/hiba), a megerősítés elérhetővé válik; a döntés a felhasználóé.
-        let p, settled = false;
-        try { p = navigator.share({ files: [file], title: part.name }); }
-        catch (e) { msg.innerHTML = `<p class="msg warn">A megosztás nem indult el: ${esc(e && e.message || e)}. Használd a letöltést.</p>`; return; }
-        msg.innerHTML = `<p class="msg">${chk}</p>`;
-        const tmr = setTimeout(() => { if (!settled) { opened = true; allow(); } }, 700);
+        if (shareHung()) { reloadOffer(msg, res); return; }
+        let p; const st = { settled: false };
+        try { p = navigator.share({ files, title: `Ex-felmérés export (${n} fájl)` }); }
+        catch (e) { if (e && e.name === "InvalidStateError") { lastShare = { settled: false }; reloadOffer(msg, res); return; } msg.innerHTML = `<p class="msg warn">A megosztás nem indult el: ${esc(e && e.message || e)}. Használd a fájlonkénti letöltést.</p>`; return; }
+        lastShare = st; msg.innerHTML = `<p class="msg">${chk}</p>`;
+        const tmr = setTimeout(() => { if (!st.settled) { opened = true; allow(); } }, 700);
         Promise.resolve(p)
-          .then(() => { settled = true; clearTimeout(tmr); opened = true; allow(); msg.innerHTML = `<p class="msg ok">Megosztva. ${chk}</p>`; })
+          .then(() => { st.settled = true; clearTimeout(tmr); opened = true; allow(); msg.innerHTML = `<p class="msg ok">Megosztva. ${chk}</p>`; })
           .catch(e => {
-            settled = true; clearTimeout(tmr);
-            if (e && e.name === "AbortError") { opened = true; allow(); msg.innerHTML = `<p class="msg warn">Az iOS „megszakítva” jelzést adott – AirDrop után ez akkor is előfordul, ha a fájl átment. ${chk} Ha nincs ott: Megosztás újra.</p>`; }
-            else if (e && e.name === "InvalidStateError") { allow(); msg.innerHTML = `<p class="msg warn">Az iOS még nem zárta le egy korábbi megosztást, ezért most nem nyílt meg. Használd a „Tartalék: letöltés” gombot (Fájlok › Letöltések), majd küldd tovább onnan; vagy zárd be és nyisd újra az appot, és ismételd az exportot. A fotók biztonságban vannak.</p>`; }
-            else { allow(); msg.innerHTML = `<p class="msg warn">A megosztás nem sikerült: ${esc(e && e.message || e)}. Próbáld újra, vagy használd a letöltést.</p>`; }
+            st.settled = true; clearTimeout(tmr);
+            if (e && e.name === "AbortError") { opened = true; allow(); msg.innerHTML = `<p class="msg warn">Az iOS „megszakítva” jelzést adott – AirDrop után ez akkor is előfordul, ha a fájlok átmentek. ${chk} Ha nincsenek ott: koppints újra az AirDrop gombra.</p>`; }
+            else if (e && e.name === "InvalidStateError") { st.settled = false; lastShare = st; allow(); reloadOffer(msg, res); }
+            else { allow(); msg.innerHTML = `<p class="msg warn">A megosztás nem sikerült: ${esc(e && e.message || e)}. Próbáld újra, vagy használd a fájlonkénti letöltést.</p>`; }
           });
       };
-      b.querySelector("#xDl").onclick = () => {
-        const a = document.createElement("a"); const u = URL.createObjectURL(part.blob); a.href = u; a.download = part.name; document.body.appendChild(a); a.click();
-        setTimeout(() => { URL.revokeObjectURL(u); a.remove(); }, 120000);
-        dlUsed = true; allow(); msg.innerHTML = `<p class="msg warn">Ellenőrizd a Fájlok app Letöltések mappájában, hogy a fájl ott van-e, majd nyomd meg: „Elmentettem – tovább”.</p>`;
-      };
-      done.onclick = () => { closeModal(); res(true); };
-      b.querySelector("#xCancel").onclick = () => { closeModal(); res(false); };
+      b.querySelectorAll("[data-dl]").forEach(btn => btn.onclick = () => {
+        const i = +btn.dataset.dl, a = document.createElement("a"), u = URL.createObjectURL(built[i].blob);
+        a.href = u; a.download = built[i].name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(u); a.remove(); }, 120000);
+        dl.add(i); btn.textContent = "Letöltve ✓"; allow();
+        msg.innerHTML = `<p class="msg warn">Letöltve: ${dl.size}/${n}. ${dl.size === n ? "Ellenőrizd a Fájlok › Letöltések mappát, majd küldd onnan AirDroppal (több fájl kijelölhető), utána „Elmentettem”." : "Töltsd le a többit is."}</p>`;
+      });
+      done.onclick = () => { closeModal(); res({ ok: true }); };
+      b.querySelector("#xCancel").onclick = () => { closeModal(); res({ ok: false }); };
     });
   });
 }
+function reloadOffer(msg, res) {
+  msg.innerHTML = `<p class="msg warn">Az iOS még nem zárta le egy korábbi megosztást, ezért most nem nyílik meg az AirDrop. Megoldás: az app elmenti az adatokat és újraindul, utána indítsd újra az exportot – a fotók biztonságban vannak, semmi nem vész el.</p>
+    <button id="xReload" class="primary" style="width:100%;margin-top:6px">Újraindítás most</button>`;
+  msg.querySelector("#xReload").onclick = () => { closeModal(); res({ ok: false, reload: true }); };
+}
+async function safeReload(text) {
+  await alertBox("Újraindítás", `<p class="msg">${text}</p>`);
+  await flushPending(); await S.saveChain; location.reload();
+}
+// Kör-limit: alapból BATCH_LIMIT; ha egy korábbi export építése közben az app összeomlott (memória), a limit feleződik (min. 1 rész).
+function batchLimit() { return (typeof window !== "undefined" && window.__EXF_BATCH_LIMIT) || S.meta.batchLimit || BATCH_LIMIT; }
+function selectBatch(cands) {
+  const out = []; let sz = 0;
+  for (const p of cands) { if (out.length && sz + p.bytes > batchLimit()) break; out.push(p); sz += p.bytes; }
+  return out;
+}
+async function checkExportCrash() {
+  // Az előző export ZIP-építése nem jutott el a küldő ablakig (pl. iOS memória miatti újraindítás) → kisebb körök.
+  const at = S.meta.exportAttempt; if (!at) return;
+  const nl = Math.max(PART_LIMIT, Math.floor((S.meta.batchLimit || BATCH_LIMIT) / 2));
+  await metaSet("batchLimit", nl); await metaSet("exportAttempt", null);
+  await alertBox("Export újraindítás után", `<p class="msg warn">Az előző export elkészítése közben az app újraindult (valószínűleg memóriahiány). Adat nem veszett el, semmi nem kapott „exportált” jelölést. Az export mostantól kisebb körökben megy (${fmtBytes(nl)} / kör) – indítsd újra.</p>`);
+}
 async function doExport(full) {
   await flushPending();
-  await busy(async () => {
-    const sel = (full ? [...S.pmeta.values()] : unexported()).sort((a, b) => a.ts < b.ts ? -1 : 1);
-    const parts = []; let cur = [], sz = 0;
-    for (const p of sel) { if (cur.length && sz + p.bytes > PART_LIMIT) { parts.push(cur); cur = []; sz = 0; } cur.push(p); sz += p.bytes; }
-    if (cur.length || !parts.length) parts.push(cur);
-    const exportId = stamp(), journal = await getAllFix("journal");
-    for (let i = 0; i < parts.length; i++) {
-      setSave("busy", `Export ${i + 1}/${parts.length} készül…`);
-      let part;
-      try { part = await buildPart(parts, i, exportId, full, journal); }
-      catch (e) { setSave("err", "EXPORT HIBA"); await alertBox("Export hiba", `<p class="msg err">${esc(e.message || e)}</p><p>Az export nem számít érvényesnek; a fotók biztonságban vannak a telefonon.</p>`); return; }
-      if (part.bad) { setSave("err", "EXPORT HIBA"); await alertBox("Export-ellenőrzési hiba", `<p class="msg err">${part.bad} elem nem ellenőrizhető a ZIP-ben. Az export nem számít érvényesnek.</p>`); return; }
-      setSave("ok", `Export ${i + 1}/${parts.length} kész`);
-      const ok = await shareStep(part, i, parts.length);
-      await metaSet("exports", (S.meta.exports || []).concat([{ name: part.name, ts: now(), photos: part.count, bytes: part.blob.size, confirmed: ok, full }]));
-      part.blob = null;
-      if (!ok) { setSave("err", "Export megszakítva"); await alertBox("Nincs megerősítve", `<p class="msg warn">A fotók nem kapnak „exportált” jelölést. Ismételd meg az exportot.</p>`); return; }
-      await txDo(["photometa", "journal"], "readwrite", t => { const st = t.objectStore("photometa");
-        for (const p of parts[i]) { const u = Object.assign({}, S.pmeta.get(p.pid)); u.exported = (u.exported || []).concat([part.name]); st.put(u); S.pmeta.set(p.pid, u); }
-        t.objectStore("journal").add({ ts: now(), by: (S.meta.session || {}).name, tel: S.installId, dev: "*", why: "export", patch: { name: part.name, photos: parts[i].length } }); });
+  let reload = null;
+  try { await busy(async () => {
+    const byTs = arr => arr.sort((a, b) => a.ts < b.ts ? -1 : 1);
+    if (full && !(S.meta.fullRun && S.meta.fullRun.id)) await metaSet("fullRun", { id: stamp(), done: [], k: 0 });
+    const cands = () => { if (!full) return byTs(unexported()); if (!S.meta.fullRun) return []; const dn = new Set(S.meta.fullRun.done); return byTs([...S.pmeta.values()].filter(p => !dn.has(p.pid))); };
+    for (let k = 1; ; k++) {
+      const sel = selectBatch(cands()), leftAfter = cands().length - sel.length;
+      const parts = []; let cur = [], sz = 0;
+      for (const p of sel) { if (cur.length && sz + p.bytes > PART_LIMIT) { parts.push(cur); cur = []; sz = 0; } cur.push(p); sz += p.bytes; }
+      if (cur.length || !parts.length) parts.push(cur);
+      const exportId = stamp(), journal = await getAllFix("journal"), built = [];
+      await metaSet("exportAttempt", { ts: now(), photos: sel.length });
+      for (let i = 0; i < parts.length; i++) {
+        setSave("busy", `Export ${i + 1}/${parts.length} készül…`);
+        let part;
+        try { part = await buildPart(parts, i, exportId, full, journal); }
+        catch (e) { await metaSet("exportAttempt", null); setSave("err", "EXPORT HIBA"); await alertBox("Export hiba", `<p class="msg err">${esc(e.message || e)}</p><p>Az export nem számít érvényesnek; a fotók biztonságban vannak a telefonon.</p>`); return; }
+        if (part.bad) { await metaSet("exportAttempt", null); setSave("err", "EXPORT HIBA"); await alertBox("Export-ellenőrzési hiba", `<p class="msg err">${part.bad} elem nem ellenőrizhető a ZIP-ben. Az export nem számít érvényesnek.</p>`); return; }
+        built.push(part);
+      }
+      await metaSet("exportAttempt", null);
+      setSave("ok", `ZIP kész (${built.length} fájl) – küldésre vár`);
+      const kk = full ? (S.meta.fullRun.k || 0) + 1 : k;
+      const r = await shareAll(built, { k: kk, multi: kk > 1 || leftAfter > 0, leftAfter });
+      if (!r.reload) await metaSet("exports", (S.meta.exports || []).concat(built.map(p => ({ name: p.name, ts: now(), photos: p.count, bytes: p.blob.size, confirmed: r.ok, full }))));
+      if (!r.ok) {
+        built.forEach(p => p.blob = null); setSave("err", "Export megszakítva");
+        if (r.reload) { reload = "Az app most újraindul (az adatok mentve). Utána nyomd meg újra az Export gombot."; return; }
+        await alertBox("Nincs megerősítve", `<p class="msg warn">A fotók nem kapnak „exportált” jelölést. Ismételd meg az exportot.</p>`); return;
+      }
+      // Jelölés + teljes-export állapot EGY tranzakcióban; a memóriabeli állapot csak sikeres commit után frissül.
+      const upd = [];
+      built.forEach((part, i) => { for (const p of parts[i]) { const u = Object.assign({}, S.pmeta.get(p.pid)); u.exported = (u.exported || []).concat([part.name]); upd.push(u); } });
+      const fr2 = full ? { id: S.meta.fullRun.id, done: S.meta.fullRun.done.concat(sel.map(p => p.pid)), k: kk } : null;
+      const fullDone = full && !leftAfter;
+      try {
+        await txDo(["photometa", "journal", "meta"], "readwrite", t => { const st = t.objectStore("photometa"); upd.forEach(u => st.put(u));
+          if (full) t.objectStore("meta").put(fullDone ? null : fr2, "fullRun");
+          t.objectStore("meta").put({ ts: now(), id: exportId, full }, "lastExport");
+          t.objectStore("journal").add({ ts: now(), by: (S.meta.session || {}).name, tel: S.installId, dev: "*", why: "export", patch: { names: built.map(p => p.name), photos: sel.length } }); });
+      } catch (e) {
+        built.forEach(p => p.blob = null); setSave("err", "MENTÉSI HIBA");
+        await alertBox("Mentési hiba", `<p class="msg err">Az „exportált” jelölés nem mentődött: ${esc(e.message || e)}</p><p>A fájlok átmentek, de a fotók exportálatlannak maradnak – a következő export újra tartalmazza őket (a műhely-importáló a duplikátumokat kiszűri).</p>`); return;
+      }
+      upd.forEach(u => S.pmeta.set(u.pid, u));
+      if (S.meta.batchLimit) { const nb = S.meta.batchLimit * 2; await metaSet("batchLimit", nb >= BATCH_LIMIT ? null : nb); }   // sikeres kör után a csökkentett limit fokozatosan visszaáll
+      if (full) S.meta.fullRun = fullDone ? null : fr2;
+      S.meta.lastExport = { ts: now(), id: exportId, full };
+      built.forEach(p => p.blob = null);
+      const left = cands().length;
+      if (!left) { setSave("ok", "Export kész ✓"); if (shareHung()) reload = "Export kész ✓. Az iOS-megosztás lezárásához az app most újraindul (az adatok mentve), hogy a következő export is gond nélkül induljon."; return; }
+      if (shareHung()) { reload = `Ez a kör kész. Még ${left} fotó van hátra. Az iOS-megosztás lezárásához az app most újraindul (az adatok mentve) – utána nyomd meg: ${full ? "„Teljes export folytatása”" : "„Növekményes export”"}.`; return; }
     }
-    await metaSet("lastExport", { ts: now(), id: exportId, full });
-    setSave("ok", "Export kész ✓");
-  });
+  }); } catch (e) {
+    setSave("err", "EXPORT HIBA");
+    await alertBox("Váratlan export-hiba", `<p class="msg err">${esc(e && e.message || e)}</p><p>A már megerősített körök jelölése megmaradt; a többi fotó exportálatlan, biztonságban van. Indítsd újra az exportot.</p>`);
+  }
+  if (reload) { await safeReload(reload); return; }
   updateBanner(); if (S.view === "export") renderExport();
 }
 
@@ -777,6 +849,7 @@ async function boot() {
     }
     $("#modal").addEventListener("click", e => { if (e.target.id === "modal" && modalDismiss) modalDismiss(); });
     await recoverPendingText();
+    await checkExportCrash();
     let cap = null; try { cap = JSON.parse(localStorage.getItem("exf_capturing") || "null"); localStorage.removeItem("exf_capturing"); } catch (e) {}
     if (cap && S.byId.has(cap.dev) && Date.now() - cap.ts < 30 * 60000 && S.meta.session) {
       const got = photosOf(cap.dev).some(p => new Date(p.ts).getTime() >= cap.ts - 2000);
