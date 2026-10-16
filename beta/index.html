@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Ex BÉTA">
+<meta name="theme-color" content="#1F3864">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<title>Ex-felmérés BÉTA</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header id="top">
+  <div class="brand"><b>Ex-felmérés</b> <span id="docid"></span></div>
+  <div id="savestate" class="savestate" aria-live="polite">—</div>
+</header>
+<div id="banner" class="banner hidden" role="status"></div>
+<main id="view"></main>
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true"><div class="sheet" id="modalbody"></div></div>
+<div id="ocrov" class="modal hidden" role="dialog" aria-modal="true" aria-live="polite" style="z-index:30"><div class="sheet" id="ocrovbody"></div></div>
+<input type="file" id="camera" accept="image/*" capture="environment" class="hidden">
+<input type="file" id="ocrcam" accept="image/*" capture="environment" class="hidden">
+<input type="file" id="gallery" accept="image/*" multiple class="hidden">
+<input type="file" id="jsonfile" accept="application/json,.json" class="hidden">
+<input type="file" id="zipfile" accept=".zip,application/zip" multiple class="hidden">
+<script src="vendor/jszip.min.js"></script>
+<script src="logic.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

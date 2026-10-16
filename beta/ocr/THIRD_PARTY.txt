@@ -1,0 +1,11 @@
+Ex-felmérés – offline szövegfelismerés: harmadik féltől származó összetevők
+
+1) ONNX Runtime Web 1.20.1 (ort-bundle.min.js, ort-wasm-simd-threaded.wasm)
+   Copyright (c) Microsoft Corporation. MIT License. https://github.com/microsoft/onnxruntime
+
+2) PaddleOCR PP-OCRv3 modellek (det.onnx = ch_PP-OCRv3_det_infer, rec.onnx = ch_PP-OCRv3_rec_infer,
+   cls.onnx = ch_ppocr_mobile_v2.0_cls_infer), karakterkészlet: keys.txt (ppocr_keys_v1)
+   Copyright (c) PaddlePaddle Authors. Apache License 2.0. https://github.com/PaddlePaddle/PaddleOCR
+   ONNX-átalakítás: RapidOCR (rapidocr-onnxruntime 1.2.3), Apache License 2.0. https://github.com/RapidAI/RapidOCR
+
+Az ocr-core.js a RapidOCR/PaddleOCR feldolgozási lépéseinek saját JavaScript-megvalósítása.
